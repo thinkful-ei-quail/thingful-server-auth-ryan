@@ -227,28 +227,81 @@ function makeThingsFixtures() {
 }
 
 function cleanTables(db) {
-  return db.raw(
-    `TRUNCATE
+  return db.transaction((trx) =>
+    trx
+      .raw(
+        `TRUNCATE
       thingful_things,
       thingful_users,
-      thingful_reviews
-      RESTART IDENTITY CASCADE`
+      thingful_reviews`
+      )
+      .then(() =>
+        Promise.all([
+          trx.raw(
+            'ALTER SEQUENCE thingful_things_id_seq minvalue 0 START WITH 1'
+          ),
+          trx.raw(
+            'ALTER SEQUENCE thingful_users_id_seq minvalue 0 START WITH 1'
+          ),
+          trx.raw(
+            'ALTER SEQUENCE thingful_reviews_id_seq minvalue 0 START WITH 1'
+          ),
+          trx.raw('SELECT setval(\'thingful_things_id_seq\', 0)'),
+          trx.raw('SELECT setval(\'thingful_users_id_seq\', 0)'),
+          trx.raw('SELECT setval(\'thingful_reviews_id_seq\', 0)'),
+        ])
+      )
   );
 }
 
-function seedThingsTables(db, users, things, reviews = []) {
+function seedUsers(db, users) {
+  const preppedUsers = users.map((user) => ({
+    ...user,
+    password: bcrypt.hashSync(user.password, 1),
+  }));
   return db
     .into('thingful_users')
-    .insert(users)
-    .then(() => db.into('thingful_things').insert(things))
-    .then(() => reviews.length && db.into('thingful_reviews').insert(reviews));
+    .insert(preppedUsers)
+    .then(() =>
+      // update the auto sequence to stay in sync
+      db.raw('SELECT setval(\'thingful_users_id_seq\', ?)', [
+        users[users.length - 1].id,
+      ])
+    );
+}
+
+function seedThingsTables(db, users, things, reviews = []) {
+  // use a transaction to group the queries and auto rollback on any failure
+  return db.transaction(async (trx) => {
+    await seedUsers(trx, users);
+    await trx.into('thingful_things').insert(things);
+    // update the auto sequence to match the forced id values
+    await trx.raw('SELECT setval(\'thingful_things_id_seq\', ?)', [
+      things[things.length - 1].id,
+    ]);
+    // only insert reviews if there are some, also update the sequence counter
+    if (reviews.length) {
+      await trx.into('thingful_reviews').insert(reviews);
+      await trx.raw('SELECT setval(\'thingful_reviews_id_seq\', ?)', [
+        reviews[reviews.length - 1].id,
+      ]);
+    }
+  });
+
+  // return db
+  //   .into('thingful_users')
+  //   .insert(users)
+  //   .then(() => db.into('thingful_things').insert(things))
+  //   .then(() => reviews.length && db.into('thingful_reviews').insert(reviews));
 }
 
 function seedMaliciousThing(db, user, thing) {
-  return db
-    .into('thingful_users')
-    .insert([user])
-    .then(() => db.into('thingful_things').insert([thing]));
+  // return db
+  //   .into('thingful_users')
+  //   .insert([user])
+  return seedUsers(db, [user]).then(() =>
+    db.into('thingful_things').insert([thing])
+  );
 }
 
 function makeAuthHeader(user) {
@@ -271,4 +324,5 @@ module.exports = {
   seedThingsTables,
   seedMaliciousThing,
   makeAuthHeader,
+  seedUsers,
 };
